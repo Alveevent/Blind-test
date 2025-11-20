@@ -1,245 +1,210 @@
-// backend/server.js
-
 const express = require('express');
+const mongoose = require('mongoose');
 const http = require('http');
 const { Server } = require('socket.io');
-const mongoose = require('mongoose');
-const cors = require('cors'); 
-const Quiz = require('./models/Quiz'); 
+const cors = require('cors');
 
-// --- 1. CONFIGURATION DE BASE ---
+// Importer le modèle de Quiz
+const Quiz = require('./models/Quiz');
 
-// N'oubliez pas de remplacer <username> et <password> par vos vraies identifiants!
-const MONGODB_URI = 'mongodb+srv://alvernhematthias_db_user:ALV-eventTheboss240911@blindtest.0rua28u.mongodb.net/?appName=blindtest'; 
-const PORT = process.env.PORT || 3000;
-
+// --- Configuration ---
 const app = express();
 const server = http.createServer(app);
 
-// >>> État global du jeu (simule un stockage en mémoire)
-const activeGames = {}; 
+// >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+// MODIFICATION CRUCIALE POUR LE CORS
+// Remplacez 'VOTRE_URL_NETLIFY' par l'URL exacte de votre site Netlify
+const FRONTEND_URL = 'https://blind-test-by-alv-event.netlify.app'; 
+// Si vous testez en local, vous pouvez aussi ajouter: 'http://localhost:5173'
+// >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
-// --- 2. MIDDLEWARES ---
-
-// Configuration de CORS pour autoriser le Frontend (http://localhost:5173) pour les requêtes HTTP REST
+// Configuration CORS pour Express (API REST)
 app.use(cors({
-    origin: 'http://localhost:5173', 
-    methods: ['GET', 'POST']
+    origin: FRONTEND_URL, 
+    methods: ['GET', 'POST'],
+    credentials: true 
 }));
+app.use(express.json()); // Middleware pour parser le JSON
 
-// Middleware pour analyser le JSON entrant
-app.use(express.json());
+// Port du serveur
+const PORT = process.env.PORT || 3000;
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/kahootclone';
 
-// --- 3. CONNEXION MONGODB ---
 
-mongoose.connect(MONGODB_URI)
-  .then(() => console.log('✅ Connecté à MongoDB'))
-  .catch(err => console.error('❌ Erreur de connexion DB:', err));
-
-// --- 4. CONFIGURATION SOCKET.IO ---
-
+// Configuration Socket.IO (WebSockets)
 const io = new Server(server, {
-  cors: {
-    origin: "*", 
-    methods: ["GET", "POST"]
-  }
+    cors: {
+        origin: FRONTEND_URL, // Doit correspondre à l'origine du frontend Netlify
+        methods: ['GET', 'POST'],
+        credentials: true
+    }
 });
 
-// --- 5. ROUTES API REST (pour la gestion des quiz par l'Admin) ---
 
+// --- Base de Données MongoDB ---
+mongoose.connect(MONGODB_URI)
+    .then(() => console.log('Connecté à MongoDB'))
+    .catch(err => console.error('Erreur de connexion DB:', err.message));
+
+
+// --- État du Jeu Global ---
+// { pin: { quizId, questions, players: [{id, name, score}], currentQuestionIndex, quizTitle } }
+const activeGames = {};
+
+
+// --- Routes API REST (pour la gestion des Quizzes) ---
+
+// 1. POST /api/quizzes : Créer un nouveau quiz
 app.post('/api/quizzes', async (req, res) => {
     try {
         const newQuiz = new Quiz(req.body);
         await newQuiz.save();
-        res.status(201).json(newQuiz);
+        res.status(201).send(newQuiz);
     } catch (error) {
-        console.error("Erreur lors de la création du quiz:", error);
-        res.status(400).json({ message: error.message });
+        res.status(400).send({ message: 'Erreur lors de la création du quiz', error: error.message });
     }
 });
 
+// 2. GET /api/quizzes : Récupérer tous les titres de quiz
 app.get('/api/quizzes', async (req, res) => {
     try {
-        const quizzes = await Quiz.find().select('title questions createdAt');
-        res.json(quizzes);
+        const quizzes = await Quiz.find({}, 'title questions'); // Récupère le titre et le contenu des questions
+        res.status(200).send(quizzes);
     } catch (error) {
-        console.error("Erreur lors de la récupération des quizzes:", error);
-        res.status(500).json({ message: "Erreur interne du serveur." });
+        res.status(500).send({ message: 'Erreur lors de la récupération des quizzes', error: error.message });
     }
 });
 
 
-// --- 6. LOGIQUE SOCKET.IO (le cœur du jeu) ---
-
-function generatePin() {
-    let pin;
-    do {
-        pin = Math.floor(1000 + Math.random() * 9000).toString();
-    } while (activeGames[pin]);
-    return pin;
-}
+// --- Logique Socket.IO (WebSockets pour le jeu en temps réel) ---
 
 io.on('connection', (socket) => {
     console.log(`Nouvel utilisateur connecté: ${socket.id}`);
 
-    // Événement 1: L'Admin crée une nouvelle partie
-    socket.on('create_game', async (quizId) => {
+    // [ADMIN] Lancer une nouvelle partie
+    socket.on('launchGame', async ({ quizId }) => {
         try {
             const quiz = await Quiz.findById(quizId);
-            if (!quiz) {
-                return socket.emit('creation_failed', 'Quiz non trouvé');
-            }
+            if (!quiz) return;
 
-            const pin = generatePin();
-            
+            // Créer un PIN aléatoire unique
+            let pin;
+            do {
+                pin = Math.floor(1000 + Math.random() * 9000); 
+            } while (activeGames[pin]);
+
             activeGames[pin] = {
                 quizId: quizId,
-                quizData: quiz,
-                currentQuestionIndex: -1, 
-                players: {}, 
-                playerSockets: new Set(), 
+                questions: quiz.questions,
+                players: [],
+                currentQuestionIndex: -1, // -1 indique le lobby
+                quizTitle: quiz.title,
                 pin: pin
             };
+
+            // L'administrateur rejoint la "room" (salle) du PIN pour recevoir les mises à jour
+            socket.join(pin); 
             
-            console.log(`Partie créée. PIN: ${pin} pour quiz: ${quiz.title}`);
-            socket.emit('game_created', { pin: pin });
-            
+            // Envoyer la première mise à jour à l'admin (pour afficher le PIN)
+            socket.emit('gameUpdate', activeGames[pin]);
+            console.log(`Partie lancée. PIN: ${pin}, Titre: ${quiz.title}`);
+
         } catch (error) {
-            console.error('Erreur lors de la création du jeu:', error);
-            socket.emit('creation_failed', 'Erreur serveur.');
+            console.error('Erreur lors du lancement du jeu:', error);
         }
     });
-    
-    // >>> NOUVEL ÉVÉNEMENT : L'Admin rejoint la room Socket.IO
-    socket.on('admin_join_room', ({ pin }) => {
-        const game = activeGames[pin];
-        if (!game) return;
 
-        socket.join(pin); 
-        console.log(`Admin (Socket ${socket.id}) a rejoint la room du PIN ${pin}.`);
-        
-        // Envoyer immédiatement la liste des joueurs déjà présents (si le joueur s'est connecté en premier)
-        const playerList = Object.values(game.players).map(p => ({ name: p.name, score: p.score }));
-        socket.emit('player_joined', playerList);
-    });
+    // [JOUEUR] Rejoindre une partie
+    socket.on('joinGame', ({ pin, name }) => {
+        const game = activeGames[pin];
 
-    // Événement 2: Un joueur rejoint la partie
-    socket.on('join_game', ({ pin, playerName }) => {
-        const game = activeGames[pin];
-        if (!game) {
-            return socket.emit('join_failed', 'PIN de jeu invalide.');
-        }
-        
-        game.players[socket.id] = { 
-            name: playerName, 
-            score: 0, 
-            latestAnswer: null, 
-            isAdmin: false 
-        };
-        game.playerSockets.add(socket.id);
-        socket.join(pin); 
-        
-        socket.emit('join_success');
-        
-        // Informer la room (Admin et autres joueurs) du nouveau joueur
-        const playerList = Object.values(game.players).map(p => ({ name: p.name, score: p.score }));
-        io.to(pin).emit('player_joined', playerList);
-        console.log(`Joueur ${playerName} a rejoint le PIN ${pin}.`);
-    });
-    
-    // Événement 3: L'Admin lance la prochaine question
-    socket.on('start_next_question', ({ pin }) => {
-        const game = activeGames[pin];
-        if (!game) return;
-        
-        game.currentQuestionIndex++;
-        
-        if (game.currentQuestionIndex >= game.quizData.questions.length) {
-            const finalPodium = Object.values(game.players).sort((a, b) => b.score - a.score);
-            io.to(pin).emit('game_finished', finalPodium);
-            delete activeGames[pin]; 
+        if (!game || game.players.some(p => p.name === name)) {
+            // Le joueur n'est pas informé directement ici. L'admin peut voir l'échec.
+            // Pour une meilleure expérience, le joueur devrait recevoir un message.
+            socket.emit('joinFailed', { message: 'PIN invalide ou nom déjà pris.' });
             return;
         }
 
-        const question = game.quizData.questions[game.currentQuestionIndex];
-        
-        const qData = {
-            index: game.currentQuestionIndex,
-            text: question.text,
-            options: question.options
+        const newPlayer = {
+            id: socket.id,
+            name: name,
+            score: 0
         };
-        
-        Object.keys(game.players).forEach(id => {
-            game.players[id].latestAnswer = null;
-        });
 
-        io.to(pin).emit('new_question', qData);
-        console.log(`Question ${game.currentQuestionIndex + 1} lancée dans le PIN ${pin}.`);
+        game.players.push(newPlayer);
+        socket.join(pin); // Le joueur rejoint la room du PIN
+
+        // Notifier l'administrateur et les autres joueurs de la room
+        io.to(pin).emit('gameUpdate', game); 
+        io.to(pin).emit('playerJoined', newPlayer); 
+
+        console.log(`Joueur ${name} a rejoint le PIN ${pin}`);
     });
 
-    // Événement 4: Un joueur soumet une réponse
-    socket.on('submit_answer', ({ pin, answerIndex, timeTaken }) => {
+    // [ADMIN] Passer à la question suivante
+    socket.on('nextQuestion', ({ pin }) => {
         const game = activeGames[pin];
-        const player = game.players[socket.id];
-        
-        if (!game || !player) return;
-        
-        if (game.currentQuestionIndex !== -1 && player.latestAnswer === null) {
-            
-            player.latestAnswer = answerIndex;
-            
-            const currentQuestion = game.quizData.questions[game.currentQuestionIndex];
-            const isCorrect = answerIndex === currentQuestion.correctAnswerIndex;
-            
-            let pointsGained = 0;
-            if (isCorrect) {
-                const MAX_TIME = 10000; 
-                pointsGained = Math.round(1000 * (1 - Math.min(timeTaken, MAX_TIME) / MAX_TIME)); 
-                
-                player.score += pointsGained;
-            }
-            
-            const scoresUpdate = [{
-                socketId: socket.id,
-                isCorrect: isCorrect,
-                pointsGained: pointsGained,
-                newScore: player.score
-            }];
-            
-            socket.emit('question_results', { 
-                correctIndex: currentQuestion.correctAnswerIndex, 
-                scoresUpdate 
-            });
-            
-            const totalPlayers = game.playerSockets.size;
-            const answeredPlayers = Object.values(game.players).filter(p => p.latestAnswer !== null).length;
-            
-            if (answeredPlayers === totalPlayers) {
-                const podium = Object.values(game.players).sort((a, b) => b.score - a.score);
-                io.to(pin).emit('podium_update', podium);
-            }
-        }
+        if (!game) return;
+
+        // Passer à l'index suivant (du lobby à Q1, de Q1 à Q2, etc.)
+        game.currentQuestionIndex += 1; 
+
+        // Notifier toute la room (Admin + Joueurs)
+        io.to(pin).emit('gameUpdate', game); 
+
+        console.log(`PIN ${pin}: Affichage de la question ${game.currentQuestionIndex}`);
     });
 
-    // Événement 5: Déconnexion
+    // [JOUEUR] Soumettre une réponse
+    socket.on('submitAnswer', ({ pin, playerId, answerIndex }) => {
+        const game = activeGames[pin];
+        if (!game || game.currentQuestionIndex < 0) return;
+
+        const currentQuestion = game.questions[game.currentQuestionIndex];
+        const player = game.players.find(p => p.id === playerId);
+
+        if (!player) return;
+
+        // VÉRIFICATION DE LA RÉPONSE (simplifiée: 100 points pour la bonne réponse)
+        const isCorrect = answerIndex === currentQuestion.correctIndex;
+        let pointsEarned = 0;
+
+        if (isCorrect) {
+            pointsEarned = 100; // Vous pouvez ajouter une logique de rapidité ici si vous voulez
+            player.score += pointsEarned;
+        }
+
+        // Notifier UNIQUEMENT le joueur de son résultat (optionnel, 'gameUpdate' met déjà à jour le score)
+        socket.emit('answerResult', { isCorrect, points: pointsEarned }); 
+
+        // Notifier la room (Admin) pour mettre à jour la liste des joueurs
+        io.to(pin).emit('gameUpdate', game);
+
+        console.log(`PIN ${pin}: ${player.name} a répondu. Correcte: ${isCorrect}, Points: ${pointsEarned}`);
+    });
+
+
+    // Gérer la déconnexion
     socket.on('disconnect', () => {
         console.log(`Utilisateur déconnecté: ${socket.id}`);
+        // Supprimer le joueur de toutes les parties actives si nécessaire
         for (const pin in activeGames) {
             const game = activeGames[pin];
-            if (game.players[socket.id]) {
-                delete game.players[socket.id];
-                game.playerSockets.delete(socket.id);
+            const initialLength = game.players.length;
+            game.players = game.players.filter(p => p.id !== socket.id);
 
-                const playerList = Object.values(game.players).map(p => ({ name: p.name, score: p.score }));
-                io.to(pin).emit('player_joined', playerList);
-                break; 
+            // Si un joueur a été retiré, notifier la room
+            if (game.players.length < initialLength) {
+                io.to(pin).emit('gameUpdate', game);
+                console.log(`Joueur retiré du PIN ${pin}`);
             }
         }
     });
+
 });
 
-// --- 7. DÉMARRAGE DU SERVEUR ---
 
+// --- Démarrer le Serveur ---
 server.listen(PORT, () => {
-  console.log(`🚀 Serveur en écoute sur http://localhost:${PORT}`);
+    console.log(`Serveur en écoute sur le port ${PORT}`);
 });
