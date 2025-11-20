@@ -1,173 +1,264 @@
-// frontend/src/AdminDashboard.jsx
-
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { io } from 'socket.io-client';
 
-const BASE_URL = 'http://localhost:3000'; // Votre serveur Backend
-const socket = io(BASE_URL); // Connexion Socket.IO
+// >>> URL DU BACKEND DÉPLOYÉ SUR RENDER
+const BASE_URL = 'https://blind-test-xttc.onrender.com';
+const API_URL = `${BASE_URL}/api/quizzes`;
 
-function AdminDashboard() {
+// Initialisation de Socket.IO
+const socket = io(BASE_URL);
+
+const AdminDashboard = () => {
     const [quizzes, setQuizzes] = useState([]);
-    const [activePin, setActivePin] = useState(null); // Le PIN de la partie en cours
-    const [players, setPlayers] = useState([]); // Liste des joueurs connectés
-    const [statusMessage, setStatusMessage] = useState('');
-    
-    // >>> CORRECTION : Ajout de l'état gameStatus
-    const [gameStatus, setGameStatus] = useState('lobby'); // 'lobby', 'active', 'finished'
-    
-    // --- 1. Gestion des Effets de Bord (Chargement des données & Socket Listeners) ---
+    const [selectedQuizId, setSelectedQuizId] = useState('');
+    const [gameStatus, setGameStatus] = useState({
+        pin: null,
+        players: [],
+        currentQuestionIndex: -1,
+        quizTitle: ''
+    });
+    const [message, setMessage] = useState('');
+
+    // 1. Récupération des Quizzes
     useEffect(() => {
-        // Chargement initial des quiz
+        const fetchQuizzes = async () => {
+            try {
+                const response = await axios.get(API_URL);
+                setQuizzes(response.data);
+            } catch (error) {
+                console.error('Erreur lors de la récupération des quizzes:', error);
+                setMessage('Erreur de connexion au serveur pour récupérer les quizzes.');
+            }
+        };
         fetchQuizzes();
+    }, []);
 
-        // 1. Événement: La partie est créée par le serveur
-        socket.on('game_created', ({ pin }) => {
-            setActivePin(pin);
-            setPlayers([]); 
-            setStatusMessage(`Partie ${pin} créée. En attente des joueurs.`);
-            setGameStatus('lobby'); // Le jeu est en lobby
-            
-            // >>> ACTION CLÉ : L'Admin rejoint la room pour recevoir les mises à jour des joueurs
-            socket.emit('admin_join_room', { pin: pin }); 
-        });
-        
-        // 2. Événement: Un joueur a rejoint le lobby
-        socket.on('player_joined', (updatedPlayers) => {
-            setPlayers(updatedPlayers);
+    // 2. Gestion des Mises à Jour du Jeu (Socket.IO)
+    useEffect(() => {
+        socket.on('gameUpdate', (data) => {
+            setGameStatus(data);
+            setMessage(`Partie PIN ${data.pin} mise à jour.`);
         });
 
-        // 3. Événement: Le serveur envoie les résultats intermédiaires/podium
-        socket.on('podium_update', (podium) => {
-            console.log("Podium reçu:", podium);
-            setStatusMessage("Classement mis à jour ! Prêt pour la prochaine question.");
+        socket.on('playerJoined', (player) => {
+            setMessage(`${player.name} a rejoint la partie.`);
         });
 
-        // 4. Événement: Le serveur signale la fin du jeu
-        socket.on('game_finished', (finalPodium) => {
-             setStatusMessage("La partie est terminée. Podium final affiché !");
-             setGameStatus('finished'); // Mise à jour de l'état
-        });
-
-        // Nettoyage des listeners
         return () => {
-            socket.off('game_created');
-            socket.off('player_joined');
-            socket.off('podium_update');
-            socket.off('game_finished');
+            socket.off('gameUpdate');
+            socket.off('playerJoined');
         };
     }, []);
 
-    // Fonction pour récupérer la liste des quiz via l'API REST
-    const fetchQuizzes = async () => {
-        try {
-            const response = await axios.get(`${BASE_URL}/api/quizzes`);
-            setQuizzes(response.data);
-        } catch (error) {
-            setStatusMessage("Erreur lors de la récupération des quizzes.");
-            console.error("Erreur fetch quizzes:", error);
-        }
-    };
-
-    // --- 2. Gestion des Actions Admin ---
-    
-    // Action: Lancer une nouvelle partie
-    const handleLaunchGame = (quizId) => {
-        if (activePin) {
-            alert("Une partie est déjà en cours !");
+    // 3. Lancement du Jeu
+    const handleLaunchGame = () => {
+        if (!selectedQuizId) {
+            setMessage('Veuillez sélectionner un quiz à lancer.');
             return;
         }
-        // Envoie l'événement au serveur pour créer une partie
-        socket.emit('create_game', quizId);
+        setMessage('Lancement de la partie...');
+        // Envoie l'événement au serveur pour démarrer
+        socket.emit('launchGame', { quizId: selectedQuizId });
     };
 
-    // Action: Lancer la prochaine question (ou la première)
+    // 4. Lancement de la Prochaine Question
     const handleNextQuestion = () => {
-        if (activePin) {
-            // Envoie la commande au serveur via Socket.IO
-            socket.emit('start_next_question', { pin: activePin });
-            setStatusMessage("Question lancée... Attente des réponses.");
-            setGameStatus('active'); // Le jeu est maintenant actif
-        }
+        if (!gameStatus.pin) return;
+        setMessage('Affichage de la prochaine question...');
+        // Envoie l'événement au serveur pour passer à la suite
+        socket.emit('nextQuestion', { pin: gameStatus.pin });
     };
-
-    // --- 3. Rendu de l'Interface ---
     
-    if (activePin) {
-        // A. Rendu de l'Interface d'Animation du Jeu (Après le lancement)
-        return (
-            <div style={{ padding: '20px', textAlign: 'center', backgroundColor: '#333', color: 'white', minHeight: '100vh' }}>
-                <h2>Partie Lancée : Affichage Projecteur 📺</h2>
-                <h1>PIN DE JEU : **{activePin}**</h1>
-                <p>{statusMessage}</p>
-                
-                <hr style={{ margin: '20px auto' }}/>
+    // 5. Affichage du Tableau de Bord
+    const isGameActive = gameStatus.pin !== null;
+    const currentQuestion = gameStatus.quizTitle ? 
+        (gameStatus.currentQuestionIndex >= 0 ? 
+            gameStatus.currentQuestionIndex + 1 : 
+            'Lobby') 
+        : null;
 
-                <h3>Joueurs Connectés ({players.length})</h3>
-                <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: '10px' }}>
-                    {players.map((p, index) => (
-                        <span key={index} style={{ background: '#555', padding: '5px 10px', borderRadius: '5px' }}>
-                            {p.name}
-                        </span>
-                    ))}
-                </div>
-                
-                {/* Bouton pour lancer la question suivante */}
-                <button 
-                    onClick={handleNextQuestion} 
-                    // Désactiver le bouton si aucun joueur n'est là, sauf si le jeu est terminé et que l'on veut juste afficher la fin.
-                    disabled={players.length === 0 && gameStatus !== 'finished'} 
-                    style={{ 
-                        padding: '15px 30px', 
-                        fontSize: '1.2em', 
-                        background: gameStatus === 'finished' ? '#F44336' : (players.length > 0 ? '#4CAF50' : '#888'), 
-                        color: 'white', 
-                        border: 'none', 
-                        cursor: 'pointer', 
-                        marginTop: '30px' 
-                    }}
-                >
-                    {gameStatus === 'finished' ? 'TERMINER LA PARTIE' : 'LANÇER LA PROCHAINE QUESTION'}
-                </button>
-            </div>
-        );
-    }
-
-    // B. Rendu de l'Interface de Sélection de Quiz (Avant le lancement)
     return (
-        <div style={{ padding: '20px', maxWidth: '800px', margin: '0 auto' }}>
-            <h2>📋 Dashboard Admin</h2>
-            <p style={{ color: 'blue', fontWeight: 'bold' }}>{statusMessage}</p>
+        <div style={styles.container}>
+            <h2 style={styles.header}>Tableau de Bord Admin</h2>
+            
+            {message && <p style={styles.message}>{message}</p>}
 
-            <h3>Quiz Disponibles :</h3>
-            {quizzes.length === 0 ? (
-                <p>Aucun quiz trouvé. Veuillez en créer un ci-dessus.</p>
-            ) : (
-                <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '15px' }}>
-                    <thead>
-                        <tr>
-                            <th style={{ borderBottom: '2px solid #333', padding: '10px', textAlign: 'left' }}>Titre</th>
-                            <th style={{ borderBottom: '2px solid #333', padding: '10px' }}>Questions</th>
-                            <th style={{ borderBottom: '2px solid #333', padding: '10px' }}>Action</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {quizzes.map((quiz) => (
-                            <tr key={quiz._id}>
-                                <td style={{ borderBottom: '1px solid #eee', padding: '10px', textAlign: 'left' }}>**{quiz.title}**</td>
-                                <td style={{ borderBottom: '1px solid #eee', padding: '10px', textAlign: 'center' }}>{quiz.questions ? quiz.questions.length : 'N/A'}</td>
-                                <td style={{ borderBottom: '1px solid #eee', padding: '10px', textAlign: 'center' }}>
-                                    <button onClick={() => handleLaunchGame(quiz._id)} style={{ padding: '8px 15px', background: 'orange', color: 'white', border: 'none', cursor: 'pointer' }}>
-                                        Lancer le Jeu
-                                    </button>
-                                </td>
-                            </tr>
+            {/* SECTION SÉLECTION ET LANCEMENT */}
+            {!isGameActive && (
+                <div style={styles.launchSection}>
+                    <h3>1. Sélectionner un Quiz</h3>
+                    <select
+                        value={selectedQuizId}
+                        onChange={(e) => setSelectedQuizId(e.target.value)}
+                        style={styles.select}
+                    >
+                        <option value="">-- Choisir un Quiz --</option>
+                        {quizzes.map(quiz => (
+                            <option key={quiz._id} value={quiz._id}>
+                                {quiz.title} ({quiz.questions.length} Q)
+                            </option>
                         ))}
-                    </tbody>
-                </table>
+                    </select>
+
+                    <button 
+                        onClick={handleLaunchGame} 
+                        disabled={!selectedQuizId}
+                        style={selectedQuizId ? styles.launchButton : styles.disabledButton}
+                    >
+                        Lancer le Jeu
+                    </button>
+                </div>
+            )}
+
+            {/* SECTION JEU ACTIF */}
+            {isGameActive && (
+                <div style={styles.activeGameSection}>
+                    <h3 style={styles.gameTitle}>Partie Active : {gameStatus.quizTitle}</h3>
+                    <div style={styles.pinDisplay}>
+                        PIN DE JEU : <span style={styles.pinNumber}>{gameStatus.pin}</span>
+                    </div>
+
+                    <p style={styles.statusText}>
+                        Statut : Question {currentQuestion} / {gameStatus.questions?.length || '...'}
+                    </p>
+
+                    <button 
+                        onClick={handleNextQuestion}
+                        style={styles.nextButton}
+                    >
+                        {gameStatus.currentQuestionIndex === -1 ? 'Démarrer la Première Question' : 'Question Suivante / Afficher le Score'}
+                    </button>
+
+                    <h4 style={styles.playerHeader}>Joueurs Connectés ({gameStatus.players.length})</h4>
+                    <ul style={styles.playerList}>
+                        {gameStatus.players.length > 0 ? (
+                            gameStatus.players.map(player => (
+                                <li key={player.id} style={styles.playerItem}>
+                                    {player.name} (Score: {player.score})
+                                </li>
+                            ))
+                        ) : (
+                            <li style={{textAlign: 'center', color: '#888'}}>En attente de joueurs...</li>
+                        )}
+                    </ul>
+                </div>
             )}
         </div>
     );
-}
+};
+
+// Styles simples pour l'esthétique
+const styles = {
+    container: {
+        padding: '20px',
+        backgroundColor: '#fff',
+        borderRadius: '8px',
+        maxWidth: '800px',
+        margin: '20px auto',
+        boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
+        border: '1px solid #ddd'
+    },
+    header: {
+        color: '#4E0187',
+        textAlign: 'center',
+        marginBottom: '20px'
+    },
+    message: {
+        padding: '10px',
+        backgroundColor: '#e6ffe6',
+        border: '1px solid #387c38',
+        color: '#387c38',
+        borderRadius: '4px',
+        textAlign: 'center',
+        marginBottom: '20px'
+    },
+    launchSection: {
+        textAlign: 'center',
+        padding: '20px',
+        border: '1px solid #ccc',
+        borderRadius: '8px'
+    },
+    select: {
+        padding: '10px',
+        marginRight: '10px',
+        borderRadius: '4px',
+        border: '1px solid #ccc',
+        minWidth: '250px'
+    },
+    launchButton: {
+        backgroundColor: '#8A2BE2',
+        color: 'white',
+        padding: '12px 25px',
+        border: 'none',
+        borderRadius: '6px',
+        cursor: 'pointer',
+        fontWeight: 'bold',
+        transition: 'background-color 0.2s',
+        marginTop: '15px'
+    },
+    disabledButton: {
+        backgroundColor: '#ccc',
+        color: '#666',
+        padding: '12px 25px',
+        border: 'none',
+        borderRadius: '6px',
+        cursor: 'not-allowed',
+        marginTop: '15px'
+    },
+    activeGameSection: {
+        textAlign: 'center',
+        padding: '20px',
+        border: '2px solid #4E0187',
+        borderRadius: '8px',
+        backgroundColor: '#f5f0ff'
+    },
+    gameTitle: {
+        color: '#4E0187'
+    },
+    pinDisplay: {
+        fontSize: '1.2rem',
+        fontWeight: 'bold',
+        marginBottom: '20px'
+    },
+    pinNumber: {
+        fontSize: '2rem',
+        color: '#FF0055',
+        marginLeft: '10px'
+    },
+    statusText: {
+        color: '#555',
+        marginBottom: '20px'
+    },
+    nextButton: {
+        backgroundColor: '#FF0055',
+        color: 'white',
+        padding: '15px 30px',
+        border: 'none',
+        borderRadius: '6px',
+        cursor: 'pointer',
+        fontWeight: 'bolder',
+        fontSize: '1.1rem',
+        transition: 'background-color 0.2s',
+        marginBottom: '20px'
+    },
+    playerHeader: {
+        color: '#333',
+        borderTop: '1px solid #ccc',
+        paddingTop: '15px',
+        marginTop: '15px'
+    },
+    playerList: {
+        listStyleType: 'none',
+        padding: 0
+    },
+    playerItem: {
+        backgroundColor: '#fff',
+        margin: '5px 0',
+        padding: '10px',
+        borderRadius: '4px',
+        boxShadow: '0 1px 3px rgba(0,0,0,0.05)'
+    }
+};
 
 export default AdminDashboard;

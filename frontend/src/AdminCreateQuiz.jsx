@@ -1,134 +1,218 @@
-// frontend/src/AdminCreateQuiz.jsx
-
 import React, { useState } from 'react';
 import axios from 'axios';
+import { io } from 'socket.io-client';
 
-const BASE_URL = 'http://localhost:3000'; // Votre serveur Backend
+// >>> URL DU BACKEND DÉPLOYÉ SUR RENDER
+const BASE_URL = 'https://blind-test-xttc.onrender.com';
+const API_URL = `${BASE_URL}/api/quizzes`;
 
-function AdminCreateQuiz() {
+// Initialisation de Socket.IO
+const socket = io(BASE_URL);
+
+const AdminCreateQuiz = () => {
     const [title, setTitle] = useState('');
-    const [questions, setQuestions] = useState([{ text: '', options: ['', '', '', ''], correctAnswerIndex: 0 }]);
+    const [questions, setQuestions] = useState([
+        { text: '', answers: ['', '', '', ''], correctIndex: 0 }
+    ]);
     const [message, setMessage] = useState('');
 
-    const addQuestion = () => {
-        setQuestions([...questions, { text: '', options: ['', '', '', ''], correctAnswerIndex: 0 }]);
-    };
-    
-    // Fonction utilitaire pour gérer les changements d'une question (texte ou index correct)
     const handleQuestionChange = (index, field, value) => {
         const newQuestions = [...questions];
-        if (field === 'correctAnswerIndex') {
-            // Assurez-vous que l'index est bien un nombre entier
-            newQuestions[index][field] = parseInt(value, 10);
-        } else {
-            newQuestions[index][field] = value;
-        }
+        newQuestions[index][field] = value;
         setQuestions(newQuestions);
     };
 
-    // Fonction utilitaire pour gérer les changements des options (A, B, C, D)
-    const handleOptionChange = (qIndex, oIndex, value) => {
+    const handleAnswerChange = (qIndex, aIndex, value) => {
         const newQuestions = [...questions];
-        newQuestions[qIndex].options[oIndex] = value;
+        newQuestions[qIndex].answers[aIndex] = value;
         setQuestions(newQuestions);
+    };
+
+    const addQuestion = () => {
+        setQuestions([...questions, { text: '', answers: ['', '', '', ''], correctIndex: 0 }]);
     };
 
     const handleSubmit = async (e) => {
         e.preventDefault();
         setMessage('Sauvegarde en cours...');
         
-        // Validation basique (un quiz doit avoir au moins une question)
-        if (!title || questions.length === 0) {
-            setMessage('Le titre et au moins une question sont requis.');
-            return;
-        }
-
         try {
-            const quizData = { title, questions };
-            // Envoie les données du quiz au serveur (Backend)
-            const response = await axios.post(`${BASE_URL}/api/quizzes`, quizData);
-            
-            setMessage(`✅ Quiz "${response.data.title}" créé avec succès! Vous pouvez le lancer depuis le Dashboard.`);
-            
-            // Réinitialiser le formulaire
+            const response = await axios.post(API_URL, { title, questions });
+            setMessage(`Quiz créé avec succès ! ID: ${response.data._id}`);
+            // Nettoyage du formulaire après succès
             setTitle('');
-            setQuestions([{ text: '', options: ['', '', '', ''], correctAnswerIndex: 0 }]);
-            
+            setQuestions([{ text: '', answers: ['', '', '', ''], correctIndex: 0 }]);
         } catch (error) {
-            // Affiche l'erreur renvoyée par le serveur (par exemple si la validation Mongoose échoue)
-            setMessage(`❌ Erreur: ${error.response?.data?.message || 'Erreur de connexion au serveur.'}`);
-            console.error(error);
+            console.error('Erreur lors de la création du quiz:', error);
+            setMessage('Erreur lors de la création. Voir la console pour les détails.');
         }
     };
 
     return (
-        <div style={{ padding: '20px', maxWidth: '800px', margin: '0 auto', border: '1px solid #ccc', borderRadius: '8px', marginBottom: '30px' }}>
-            <h2>✍️ Créer un Nouveau Quiz</h2>
-            {message && <p style={{ fontWeight: 'bold', color: message.startsWith('❌') ? 'red' : 'green' }}>{message}</p>}
-            
-            <form onSubmit={handleSubmit}>
-                <label style={{ display: 'block', fontWeight: 'bold', marginTop: '15px' }}>Titre du Quiz:</label>
-                <input 
-                    type="text" 
-                    value={title} 
-                    onChange={(e) => setTitle(e.target.value)} 
-                    required 
-                    style={{ display: 'block', margin: '10px 0', padding: '8px', width: '100%', boxSizing: 'border-box' }}
-                />
+        <div style={styles.container}>
+            <h2 style={styles.header}>Créer un Nouveau Blind-Test (Quiz)</h2>
+            <form onSubmit={handleSubmit} style={styles.form}>
+                
+                <div style={styles.inputGroup}>
+                    <label style={styles.label}>Titre du Quiz :</label>
+                    <input
+                        type="text"
+                        value={title}
+                        onChange={(e) => setTitle(e.target.value)}
+                        required
+                        style={styles.input}
+                        placeholder="Ex: Hits des années 90"
+                    />
+                </div>
 
                 {questions.map((q, qIndex) => (
-                    <div key={qIndex} style={{ border: '2px solid #ddd', padding: '15px', margin: '15px 0', borderRadius: '6px' }}>
-                        <h4 style={{ borderBottom: '1px solid #eee', paddingBottom: '10px' }}>Question {qIndex + 1}</h4>
-                        
-                        <label style={{ display: 'block', marginTop: '10px' }}>Texte de la Question: </label>
-                        <input 
-                            type="text" 
-                            value={q.text} 
-                            onChange={(e) => handleQuestionChange(qIndex, 'text', e.target.value)} 
-                            required 
-                            style={{ display: 'block', margin: '10px 0', padding: '8px', width: '100%', boxSizing: 'border-box' }}
+                    <div key={qIndex} style={styles.questionCard}>
+                        <h3 style={styles.questionHeader}>Question {qIndex + 1}</h3>
+                        <input
+                            type="text"
+                            value={q.text}
+                            onChange={(e) => handleQuestionChange(qIndex, 'text', e.target.value)}
+                            required
+                            style={styles.input}
+                            placeholder="Ex: Quel est le titre de cette chanson ?"
                         />
-
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-                            {q.options.map((option, oIndex) => (
-                                <div key={oIndex} style={{ display: 'flex', alignItems: 'center', background: oIndex % 2 === 0 ? '#f9f9f9' : '#f5f5f5', padding: '5px', borderRadius: '4px' }}>
-                                    <label style={{ marginRight: '5px', fontWeight: 'bold', color: ['red', 'blue', 'orange', 'green'][oIndex] }}>{['A', 'B', 'C', 'D'][oIndex]}:</label>
+                        
+                        <div style={styles.answersGrid}>
+                            {q.answers.map((a, aIndex) => (
+                                <div key={aIndex} style={styles.answerItem}>
+                                    <input
+                                        type="radio"
+                                        name={`correct-${qIndex}`}
+                                        checked={q.correctIndex === aIndex}
+                                        onChange={() => handleQuestionChange(qIndex, 'correctIndex', aIndex)}
+                                        style={styles.radio}
+                                    />
                                     <input
                                         type="text"
-                                        value={option}
-                                        onChange={(e) => handleOptionChange(qIndex, oIndex, e.target.value)}
+                                        value={a}
+                                        onChange={(e) => handleAnswerChange(qIndex, aIndex, e.target.value)}
                                         required
-                                        style={{ padding: '5px', width: '100%' }}
+                                        style={{...styles.input, ...styles.answerInput}}
+                                        placeholder={`Option ${aIndex + 1}`}
                                     />
                                 </div>
                             ))}
                         </div>
-                        
-                        <label style={{ marginTop: '15px', display: 'block' }}>
-                            Réponse Correcte (Index 1 à 4):
-                            <select 
-                                value={q.correctAnswerIndex + 1} 
-                                onChange={(e) => handleQuestionChange(qIndex, 'correctAnswerIndex', e.target.value - 1)}
-                                style={{ marginLeft: '10px', padding: '8px' }}
-                            >
-                                <option value={1}>1 - {q.options[0] || 'Option 1'}</option>
-                                <option value={2}>2 - {q.options[1] || 'Option 2'}</option>
-                                <option value={3}>3 - {q.options[2] || 'Option 3'}</option>
-                                <option value={4}>4 - {q.options[3] || 'Option 4'}</option>
-                            </select>
-                        </label>
                     </div>
                 ))}
 
-                <button type="button" onClick={addQuestion} style={{ padding: '10px 20px', marginRight: '10px', marginTop: '15px' }}>
+                <button type="button" onClick={addQuestion} style={styles.addButton}>
                     + Ajouter une Question
                 </button>
-                <button type="submit" style={{ padding: '10px 20px', background: 'green', color: 'white', border: 'none', cursor: 'pointer' }}>
+                
+                <button type="submit" style={styles.submitButton}>
                     Sauvegarder le Quiz
                 </button>
             </form>
+
+            {message && <p style={styles.message}>{message}</p>}
         </div>
     );
-}
+};
+
+// Styles simples pour l'esthétique
+const styles = {
+    container: {
+        padding: '20px',
+        backgroundColor: '#fff',
+        borderRadius: '8px',
+        maxWidth: '800px',
+        margin: '20px auto',
+        boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
+        border: '1px solid #ddd'
+    },
+    header: {
+        color: '#4E0187',
+        textAlign: 'center',
+        marginBottom: '20px'
+    },
+    form: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '20px'
+    },
+    inputGroup: {
+        marginBottom: '15px',
+    },
+    label: {
+        display: 'block',
+        marginBottom: '5px',
+        fontWeight: 'bold',
+        color: '#333'
+    },
+    input: {
+        width: '100%',
+        padding: '10px',
+        borderRadius: '4px',
+        border: '1px solid #ccc',
+        boxSizing: 'border-box'
+    },
+    questionCard: {
+        border: '2px solid #f0f0f0',
+        borderRadius: '8px',
+        padding: '15px',
+        backgroundColor: '#fafafa'
+    },
+    questionHeader: {
+        color: '#8A2BE2',
+        marginTop: 0,
+        fontSize: '1.1rem'
+    },
+    answersGrid: {
+        display: 'grid',
+        gridTemplateColumns: '1fr 1fr',
+        gap: '10px',
+        marginTop: '15px'
+    },
+    answerItem: {
+        display: 'flex',
+        alignItems: 'center',
+        backgroundColor: '#fff',
+        padding: '5px',
+        borderRadius: '4px',
+        border: '1px solid #eee'
+    },
+    answerInput: {
+        marginLeft: '10px',
+        flexGrow: 1,
+        padding: '8px'
+    },
+    radio: {
+        transform: 'scale(1.2)'
+    },
+    addButton: {
+        backgroundColor: '#387c38',
+        color: 'white',
+        padding: '12px',
+        border: 'none',
+        borderRadius: '6px',
+        cursor: 'pointer',
+        fontWeight: 'bold',
+        transition: 'background-color 0.2s'
+    },
+    submitButton: {
+        backgroundColor: '#4E0187',
+        color: 'white',
+        padding: '15px',
+        border: 'none',
+        borderRadius: '6px',
+        cursor: 'pointer',
+        fontWeight: 'bold',
+        fontSize: '1.1rem',
+        transition: 'background-color 0.2s',
+        marginTop: '20px'
+    },
+    message: {
+        marginTop: '20px',
+        textAlign: 'center',
+        color: 'green',
+        fontWeight: 'bold'
+    }
+};
 
 export default AdminCreateQuiz;

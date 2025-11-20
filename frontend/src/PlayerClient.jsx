@@ -1,226 +1,293 @@
-// frontend/src/PlayerClient.jsx
-
 import React, { useState, useEffect } from 'react';
 import { io } from 'socket.io-client';
 
-const BASE_URL = 'http://localhost:3000';
+// >>> URL DU BACKEND DÉPLOYÉ SUR RENDER
+const BASE_URL = 'https://blind-test-xttc.onrender.com';
+
+// Initialisation de Socket.IO
 const socket = io(BASE_URL);
 
-// États possibles du joueur
-const GAME_STATES = {
-    DISCONNECTED: 'DISCONNECTED',
-    LOBBY: 'LOBBY',
-    WAITING_QUESTION: 'WAITING_QUESTION',
-    QUESTION_ACTIVE: 'QUESTION_ACTIVE',
-    QUESTION_RESULT: 'QUESTION_RESULT',
-    GAME_FINISHED: 'GAME_FINISHED'
-};
-
-function PlayerClient() {
-    const [gameState, setGameState] = useState(GAME_STATES.DISCONNECTED);
+const PlayerClient = () => {
     const [pin, setPin] = useState('');
-    const [playerName, setPlayerName] = useState('');
-    const [currentQuestion, setCurrentQuestion] = useState(null);
-    const [selectedAnswerIndex, setSelectedAnswerIndex] = useState(null);
-    const [result, setResult] = useState(null); // Pour afficher si la réponse était bonne/mauvaise
-    const [playerScore, setPlayerScore] = useState(0);
+    const [name, setName] = useState('');
+    const [isConnected, setIsConnected] = useState(false);
+    const [gameStatus, setGameStatus] = useState(null); // Contient l'état du jeu (question, score)
+    const [message, setMessage] = useState('');
+    const [hasAnswered, setHasAnswered] = useState(false);
 
-    // --- 1. Gestion des Listeners Socket.IO ---
-
+    // 1. Gestion des connexions Socket.IO
     useEffect(() => {
-        // 1. Succès de la connexion au lobby
-        socket.on('join_success', () => {
-            setGameState(GAME_STATES.LOBBY);
-            setResult(null);
+        socket.on('connect', () => {
+            console.log('Connecté au serveur Socket.IO');
         });
 
-        // 2. Échec de la connexion
-        socket.on('join_failed', (message) => {
-            alert(`Échec de la connexion : ${message}`);
-            setGameState(GAME_STATES.DISCONNECTED);
+        socket.on('disconnect', () => {
+            console.log('Déconnecté du serveur.');
+            setIsConnected(false);
+            setGameStatus(null);
         });
 
-        // 3. Réception d'une nouvelle question
-        socket.on('new_question', (qData) => {
-            setCurrentQuestion(qData);
-            setSelectedAnswerIndex(null); // Réinitialiser le choix
-            setGameState(GAME_STATES.QUESTION_ACTIVE);
-        });
-
-        // 4. Réception des résultats de la question
-        socket.on('question_results', ({ correctIndex, scoresUpdate }) => {
-            const playerUpdate = scoresUpdate.find(s => s.socketId === socket.id);
-            if (playerUpdate) {
-                setPlayerScore(playerUpdate.newScore);
-                setResult({
-                    isCorrect: playerUpdate.isCorrect,
-                    pointsGained: playerUpdate.pointsGained,
-                    correctIndex: correctIndex,
-                });
+        // 2. Mises à Jour du Jeu
+        socket.on('gameUpdate', (data) => {
+            if (data.pin === parseInt(pin)) {
+                setGameStatus(data);
+                
+                // Si la question change ou est le lobby
+                if (data.currentQuestionIndex !== gameStatus?.currentQuestionIndex) {
+                    setHasAnswered(false); // Réinitialiser le statut de réponse à chaque nouvelle question
+                    setMessage(data.currentQuestionIndex === -1 ? 'En attente du lancement de la partie...' : 'Nouvelle question !');
+                }
             }
-            setGameState(GAME_STATES.QUESTION_RESULT);
-        });
-        
-        // 5. Fin du jeu
-        socket.on('game_finished', (finalPodium) => {
-             setCurrentQuestion({text: "La partie est terminée ! Voir l'écran de l'Admin pour le classement final."});
-             setResult(finalPodium);
-             setGameState(GAME_STATES.GAME_FINISHED);
         });
 
+        // 3. Confirmation de Réponse
+        socket.on('answerResult', (data) => {
+            if (data.isCorrect) {
+                setMessage(`Réponse correcte ! +${data.points} points !`);
+            } else {
+                setMessage('Réponse incorrecte ou trop lente.');
+            }
+            // Mettre à jour le score local si besoin, ou attendre gameUpdate
+        });
 
         return () => {
-            socket.off('join_success');
-            socket.off('join_failed');
-            socket.off('new_question');
-            socket.off('question_results');
-            socket.off('game_finished');
+            socket.off('connect');
+            socket.off('disconnect');
+            socket.off('gameUpdate');
+            socket.off('answerResult');
         };
-    }, []);
+    }, [pin, gameStatus?.currentQuestionIndex]);
 
-    // --- 2. Fonctions d'Action ---
 
-    const handleJoin = (e) => {
+    // 4. Fonction de Connexion
+    const handleJoinGame = (e) => {
         e.preventDefault();
-        if (pin && playerName) {
-            // Envoi de la requête de connexion au serveur
-            socket.emit('join_game', { pin: pin.trim(), playerName: playerName.trim() });
+        if (!pin || !name) {
+            setMessage('Veuillez entrer un PIN et un nom.');
+            return;
         }
+
+        setMessage(`Tentative de connexion au PIN ${pin} avec le nom ${name}...`);
+        
+        // Envoie les infos de connexion au serveur
+        socket.emit('joinGame', { pin: parseInt(pin), name });
+        
+        // Le serveur répondra avec 'gameUpdate' si la connexion est réussie.
+        setIsConnected(true);
     };
 
-    const handleAnswerSubmit = (index) => {
-        if (selectedAnswerIndex === null) {
-            setSelectedAnswerIndex(index);
-            const timeTaken = 500; // Simuler le temps de réponse (doit être calculé en réalité)
+    // 5. Fonction pour Envoyer la Réponse
+    const handleAnswer = (answerIndex) => {
+        if (hasAnswered) return;
+
+        setMessage('Réponse envoyée, attente des résultats...');
+        setHasAnswered(true);
+
+        socket.emit('submitAnswer', {
+            pin: parseInt(pin),
+            playerId: socket.id,
+            answerIndex: answerIndex,
+        });
+    };
+
+    // Affichage du composant
+    const currentQuestion = gameStatus?.questions?.[gameStatus.currentQuestionIndex];
+    const player = gameStatus?.players?.find(p => p.id === socket.id);
+
+    return (
+        <div style={styles.container}>
+            <h1 style={styles.header}>🎮 Client Joueur</h1>
             
-            // Envoyer la réponse au serveur
-            socket.emit('submit_answer', { 
-                pin: pin, 
-                answerIndex: index, 
-                timeTaken: timeTaken 
-            });
-            // Le joueur attend maintenant les résultats
-            setGameState(GAME_STATES.WAITING_QUESTION);
-        }
-    };
+            {message && <p style={styles.message}>{message}</p>}
 
-    // --- 3. Rendu par État de Jeu ---
-    
-    // Rendu 1: Connexion (État initial)
-    if (gameState === GAME_STATES.DISCONNECTED) {
-        return (
-            <div style={{ padding: '20px', maxWidth: '400px', margin: '50px auto', textAlign: 'center' }}>
-                <h2>🔑 Rejoindre une Partie</h2>
-                <form onSubmit={handleJoin}>
-                    <input 
-                        type="text" 
-                        placeholder="PIN de Jeu (4 chiffres)" 
-                        value={pin} 
-                        onChange={(e) => setPin(e.target.value)} 
-                        required 
-                        style={{ padding: '10px', margin: '10px 0', width: '100%', fontSize: '1.2em' }}
+            {!isConnected ? (
+                // FORMULAIRE DE CONNEXION
+                <form onSubmit={handleJoinGame} style={styles.form}>
+                    <input
+                        type="number"
+                        placeholder="PIN de Jeu"
+                        value={pin}
+                        onChange={(e) => setPin(e.target.value)}
+                        required
+                        style={styles.input}
                     />
-                    <input 
-                        type="text" 
-                        placeholder="Votre Pseudo" 
-                        value={playerName} 
-                        onChange={(e) => setPlayerName(e.target.value)} 
-                        required 
-                        style={{ padding: '10px', margin: '10px 0', width: '100%', fontSize: '1.2em' }}
+                    <input
+                        type="text"
+                        placeholder="Votre Nom"
+                        value={name}
+                        onChange={(e) => setName(e.target.value)}
+                        required
+                        style={styles.input}
                     />
-                    <button type="submit" style={{ padding: '15px', background: 'purple', color: 'white', border: 'none', width: '100%', fontSize: '1.2em', cursor: 'pointer' }}>
-                        Connecter
+                    <button type="submit" style={styles.joinButton}>
+                        Rejoindre la Partie
                     </button>
                 </form>
-            </div>
-        );
-    }
-    
-    // Rendu 2: Lobby (En attente du début)
-    if (gameState === GAME_STATES.LOBBY || gameState === GAME_STATES.WAITING_QUESTION) {
-        return (
-            <div style={{ padding: '20px', maxWidth: '600px', margin: '50px auto', textAlign: 'center' }}>
-                <h2 style={{ color: '#4CAF50' }}>✅ Connecté au Lobby</h2>
-                <p>PIN : **{pin}**</p>
-                <h3>Bienvenue, **{playerName}** !</h3>
-                <p>Score actuel : {playerScore} points</p>
-                <div style={{ padding: '20px', border: '1px solid #ccc', marginTop: '20px' }}>
-                    {gameState === GAME_STATES.LOBBY 
-                        ? "En attente du lancement de la partie par l'Admin..."
-                        : "Réponse envoyée. Attente des résultats..."}
+            ) : (
+                // INTERFACE DU JEU
+                <div style={styles.gameInterface}>
+                    <p style={styles.status}>Connecté au Lobby : {gameStatus?.quizTitle || '...'}</p>
+                    <p style={styles.pinText}>PIN: <span style={styles.pinNumber}>{pin}</span></p>
+                    <p style={styles.scoreText}>Score actuel: <span style={styles.scoreValue}>{player?.score || 0}</span> points</p>
+                    
+                    {currentQuestion && gameStatus.currentQuestionIndex !== -1 ? (
+                        // AFFICHAGE DE LA QUESTION
+                        <div style={styles.questionSection}>
+                            <h2 style={styles.questionText}>Question {gameStatus.currentQuestionIndex + 1} :</h2>
+                            <p style={styles.questionTextDetail}>{currentQuestion.text}</p>
+                            
+                            <div style={styles.answerGrid}>
+                                {currentQuestion.answers.map((answer, index) => (
+                                    <button
+                                        key={index}
+                                        onClick={() => handleAnswer(index)}
+                                        disabled={hasAnswered}
+                                        style={{...styles.answerButton, backgroundColor: styles.colors[index]}}
+                                    >
+                                        {answer}
+                                    </button>
+                                ))}
+                            </div>
+                            {hasAnswered && <p style={styles.answered}>Réponse Soumise !</p>}
+                        </div>
+                    ) : (
+                        // LOBBY / FIN DE PARTIE
+                        <div style={styles.waitingScreen}>
+                            {gameStatus && gameStatus.currentQuestionIndex === -1 ? (
+                                <p>En attente du lancement de la partie par l'Admin...</p>
+                            ) : (
+                                <p>Fin de partie ou affichage du classement. Attente de l'Admin.</p>
+                            )}
+                            
+                        </div>
+                    )}
                 </div>
-            </div>
-        );
-    }
+            )}
+        </div>
+    );
+};
 
-    // Rendu 3: Question Active
-    if (gameState === GAME_STATES.QUESTION_ACTIVE) {
-        return (
-            <div style={{ padding: '20px', maxWidth: '600px', margin: '20px auto', textAlign: 'center' }}>
-                <h2>Question {currentQuestion.index + 1}</h2>
-                <h3 style={{ padding: '20px', background: '#f0f0f0', borderRadius: '10px' }}>
-                    {currentQuestion.text}
-                </h3>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px', marginTop: '20px' }}>
-                    {currentQuestion.options.map((option, index) => (
-                        <button 
-                            key={index}
-                            onClick={() => handleAnswerSubmit(index)}
-                            disabled={selectedAnswerIndex !== null}
-                            style={{ 
-                                padding: '30px 10px', 
-                                fontSize: '1.1em', 
-                                border: 'none', 
-                                cursor: 'pointer',
-                                background: selectedAnswerIndex === index ? 'orange' : ['red', 'blue', 'orange', 'green'][index],
-                                color: 'white',
-                                opacity: selectedAnswerIndex !== null && selectedAnswerIndex !== index ? 0.5 : 1
-                            }}
-                        >
-                            {/* NOTE: Le joueur de Kahoot ne voit normalement pas le texte de la réponse, juste le symbole/couleur. 
-                                 Nous laissons le texte pour le moment pour faciliter le test. */}
-                            {option}
-                        </button>
-                    ))}
-                </div>
-            </div>
-        );
+// Styles simples pour l'esthétique
+const styles = {
+    colors: ['#007bff', '#dc3545', '#ffc107', '#28a745'], // Bleu, Rouge, Jaune, Vert
+    container: {
+        padding: '30px',
+        backgroundColor: '#fff',
+        borderRadius: '12px',
+        maxWidth: '500px',
+        margin: '40px auto',
+        boxShadow: '0 8px 16px rgba(0,0,0,0.15)',
+        border: '3px solid #4E0187'
+    },
+    header: {
+        color: '#4E0187',
+        textAlign: 'center',
+        marginBottom: '25px',
+        fontSize: '1.8rem'
+    },
+    message: {
+        padding: '12px',
+        backgroundColor: '#fff0f0',
+        border: '1px solid #dc3545',
+        color: '#dc3545',
+        borderRadius: '6px',
+        textAlign: 'center',
+        marginBottom: '20px',
+        fontWeight: 'bold'
+    },
+    form: {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '15px'
+    },
+    input: {
+        padding: '12px',
+        borderRadius: '6px',
+        border: '1px solid #ccc',
+        fontSize: '1rem',
+        textAlign: 'center'
+    },
+    joinButton: {
+        backgroundColor: '#8A2BE2',
+        color: 'white',
+        padding: '15px',
+        border: 'none',
+        borderRadius: '6px',
+        cursor: 'pointer',
+        fontWeight: 'bold',
+        fontSize: '1.1rem',
+        transition: 'background-color 0.2s'
+    },
+    gameInterface: {
+        textAlign: 'center'
+    },
+    status: {
+        color: '#28a745',
+        fontWeight: 'bold',
+        marginBottom: '10px'
+    },
+    pinText: {
+        fontSize: '1.1rem',
+        color: '#555'
+    },
+    pinNumber: {
+        color: '#FF0055',
+        fontWeight: 'bold'
+    },
+    scoreText: {
+        fontSize: '1.1rem',
+        marginTop: '10px',
+        borderTop: '1px solid #eee',
+        paddingTop: '10px'
+    },
+    scoreValue: {
+        color: '#007bff',
+        fontWeight: 'bold',
+        marginLeft: '5px'
+    },
+    questionSection: {
+        marginTop: '30px',
+        padding: '20px',
+        border: '1px solid #8A2BE2',
+        borderRadius: '8px',
+        backgroundColor: '#f9f9ff'
+    },
+    questionText: {
+        color: '#4E0187',
+        fontSize: '1.4rem'
+    },
+    questionTextDetail: {
+        fontWeight: 'bold',
+        fontSize: '1.2rem',
+        marginBottom: '20px'
+    },
+    answerGrid: {
+        display: 'grid',
+        gridTemplateColumns: '1fr 1fr',
+        gap: '15px'
+    },
+    answerButton: {
+        color: 'white',
+        padding: '20px 10px',
+        border: 'none',
+        borderRadius: '8px',
+        cursor: 'pointer',
+        fontWeight: 'bold',
+        fontSize: '1rem',
+        transition: 'opacity 0.2s',
+        boxShadow: '0 4px 6px rgba(0,0,0,0.1)'
+    },
+    answered: {
+        marginTop: '15px',
+        color: '#8A2BE2',
+        fontWeight: 'bold'
+    },
+    waitingScreen: {
+        marginTop: '30px',
+        padding: '20px',
+        backgroundColor: '#f0f0f0',
+        borderRadius: '8px'
     }
-
-    // Rendu 4: Résultat de la Question
-    if (gameState === GAME_STATES.QUESTION_RESULT) {
-        const isCorrect = result.isCorrect;
-        const correctOption = currentQuestion.options[result.correctIndex];
-        const statusStyle = { padding: '20px', borderRadius: '10px', margin: '20px 0' };
-
-        return (
-            <div style={{ padding: '20px', maxWidth: '600px', margin: '20px auto', textAlign: 'center' }}>
-                <h2 style={{ ...statusStyle, background: isCorrect ? '#4CAF50' : '#F44336', color: 'white' }}>
-                    {isCorrect ? '🥳 CORRECT !' : '❌ FAUX !'}
-                </h2>
-                <p>La bonne réponse était : **{correctOption}**</p>
-                {isCorrect && <p>Vous gagnez **{result.pointsGained}** points !</p>}
-                
-                <h3 style={{ marginTop: '30px' }}>Votre Score Total : **{playerScore}**</h3>
-                <p>En attente de la prochaine question par l'Admin...</p>
-            </div>
-        );
-    }
-    
-    // Rendu 5: Fin du Jeu
-    if (gameState === GAME_STATES.GAME_FINISHED) {
-        return (
-            <div style={{ padding: '20px', maxWidth: '600px', margin: '50px auto', textAlign: 'center' }}>
-                 <h2>🎉 FIN DE LA PARTIE !</h2>
-                 <p>{currentQuestion.text}</p>
-                 <h3>Votre Score Final : **{playerScore}**</h3>
-                 <p>Merci d'avoir joué !</p>
-            </div>
-        );
-    }
-    
-    // Rendu par défaut
-    return null;
-}
+};
 
 export default PlayerClient;
