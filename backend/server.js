@@ -12,11 +12,15 @@ const app = express();
 const server = http.createServer(app);
 
 // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-// MODIFICATION CRUCIALE POUR LE CORS
-// Remplacez 'VOTRE_URL_NETLIFY' par l'URL exacte de votre site Netlify
-const FRONTEND_URL = 'https://blind-test-by-alv-event.netlify.app'; 
-// Si vous testez en local, vous pouvez aussi ajouter: 'http://localhost:5173'
+// AJOUT DE LA ROUTE DE BASE POUR LE HEALTH CHECK DE RENDER
+// Ceci est CRUCIAL pour les plans gratuits !
+app.get('/', (req, res) => {
+    res.status(200).send('Serveur Quizz ALV-EVENT en ligne.');
+});
 // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+// CORRECTION CORS : Autoriser votre Frontend Netlify
+const FRONTEND_URL = 'https://blind-test-by-alv-event.netlify.app'; 
 
 // Configuration CORS pour Express (API REST)
 app.use(cors({
@@ -42,6 +46,9 @@ const io = new Server(server, {
 
 
 // --- Base de Données MongoDB ---
+// Note : Le serveur doit être capable de se connecter, même s'il met 10 secondes.
+// Le message 'déconnecté' est étrange si la connexion a réussi. 
+// Assurez-vous que l'URL MONGODB_URI sur Render est bien correcte !
 mongoose.connect(MONGODB_URI)
     .then(() => console.log('Connecté à MongoDB'))
     .catch(err => console.error('Erreur de connexion DB:', err.message));
@@ -61,16 +68,19 @@ app.post('/api/quizzes', async (req, res) => {
         await newQuiz.save();
         res.status(201).send(newQuiz);
     } catch (error) {
-        res.status(400).send({ message: 'Erreur lors de la création du quiz', error: error.message });
+        // En cas d'erreur ici, le problème est soit DB (MongoDB) soit le schéma de données
+        res.status(500).send({ message: 'Erreur lors de la création du quiz', error: error.message });
     }
 });
 
 // 2. GET /api/quizzes : Récupérer tous les titres de quiz
 app.get('/api/quizzes', async (req, res) => {
     try {
-        const quizzes = await Quiz.find({}, 'title questions'); // Récupère le titre et le contenu des questions
+        // Cette ligne peut planter si la connexion DB est coupée.
+        const quizzes = await Quiz.find({}, 'title questions'); 
         res.status(200).send(quizzes);
     } catch (error) {
+        // L'erreur 500 que vous avez vue venait probablement d'ici si la DB est perdue.
         res.status(500).send({ message: 'Erreur lors de la récupération des quizzes', error: error.message });
     }
 });
@@ -87,7 +97,7 @@ io.on('connection', (socket) => {
             const quiz = await Quiz.findById(quizId);
             if (!quiz) return;
 
-            // Créer un PIN aléatoire unique
+            // ... (reste du code Socket.IO inchangé) ...
             let pin;
             do {
                 pin = Math.floor(1000 + Math.random() * 9000); 
@@ -102,10 +112,8 @@ io.on('connection', (socket) => {
                 pin: pin
             };
 
-            // L'administrateur rejoint la "room" (salle) du PIN pour recevoir les mises à jour
             socket.join(pin); 
             
-            // Envoyer la première mise à jour à l'admin (pour afficher le PIN)
             socket.emit('gameUpdate', activeGames[pin]);
             console.log(`Partie lancée. PIN: ${pin}, Titre: ${quiz.title}`);
 
@@ -119,8 +127,6 @@ io.on('connection', (socket) => {
         const game = activeGames[pin];
 
         if (!game || game.players.some(p => p.name === name)) {
-            // Le joueur n'est pas informé directement ici. L'admin peut voir l'échec.
-            // Pour une meilleure expérience, le joueur devrait recevoir un message.
             socket.emit('joinFailed', { message: 'PIN invalide ou nom déjà pris.' });
             return;
         }
@@ -132,9 +138,8 @@ io.on('connection', (socket) => {
         };
 
         game.players.push(newPlayer);
-        socket.join(pin); // Le joueur rejoint la room du PIN
+        socket.join(pin);
 
-        // Notifier l'administrateur et les autres joueurs de la room
         io.to(pin).emit('gameUpdate', game); 
         io.to(pin).emit('playerJoined', newPlayer); 
 
@@ -146,10 +151,8 @@ io.on('connection', (socket) => {
         const game = activeGames[pin];
         if (!game) return;
 
-        // Passer à l'index suivant (du lobby à Q1, de Q1 à Q2, etc.)
         game.currentQuestionIndex += 1; 
 
-        // Notifier toute la room (Admin + Joueurs)
         io.to(pin).emit('gameUpdate', game); 
 
         console.log(`PIN ${pin}: Affichage de la question ${game.currentQuestionIndex}`);
@@ -165,19 +168,16 @@ io.on('connection', (socket) => {
 
         if (!player) return;
 
-        // VÉRIFICATION DE LA RÉPONSE (simplifiée: 100 points pour la bonne réponse)
         const isCorrect = answerIndex === currentQuestion.correctIndex;
         let pointsEarned = 0;
 
         if (isCorrect) {
-            pointsEarned = 100; // Vous pouvez ajouter une logique de rapidité ici si vous voulez
+            pointsEarned = 100;
             player.score += pointsEarned;
         }
 
-        // Notifier UNIQUEMENT le joueur de son résultat (optionnel, 'gameUpdate' met déjà à jour le score)
         socket.emit('answerResult', { isCorrect, points: pointsEarned }); 
 
-        // Notifier la room (Admin) pour mettre à jour la liste des joueurs
         io.to(pin).emit('gameUpdate', game);
 
         console.log(`PIN ${pin}: ${player.name} a répondu. Correcte: ${isCorrect}, Points: ${pointsEarned}`);
@@ -187,13 +187,11 @@ io.on('connection', (socket) => {
     // Gérer la déconnexion
     socket.on('disconnect', () => {
         console.log(`Utilisateur déconnecté: ${socket.id}`);
-        // Supprimer le joueur de toutes les parties actives si nécessaire
         for (const pin in activeGames) {
             const game = activeGames[pin];
             const initialLength = game.players.length;
             game.players = game.players.filter(p => p.id !== socket.id);
 
-            // Si un joueur a été retiré, notifier la room
             if (game.players.length < initialLength) {
                 io.to(pin).emit('gameUpdate', game);
                 console.log(`Joueur retiré du PIN ${pin}`);
